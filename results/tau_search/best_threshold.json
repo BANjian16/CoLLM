@@ -1,0 +1,38 @@
+{
+  "search_split": "train_val (val_ratio=0.2)",
+  "weight_rmse": 0.5,
+  "large_cost": 14.54,
+  "grid": {
+    "tau1": [
+      0.3,
+      0.95,
+      0.05
+    ],
+    "tau2": [
+      -0.2,
+      0.2,
+      0.02
+    ]
+  },
+  "best": {
+    "tau1": 0.3,
+    "tau2": -0.2,
+    "rmse": 13.888484001159668,
+    "ratio_small": 1.0,
+    "ratio_lm": 0.0,
+    "ratio_fusion": 0.0,
+    "est_cost": 1.0,
+    "rmse_norm": 0.0,
+    "cost_norm": 0.0,
+    "score": 0.0
+  },
+  "rmse_range": [
+    13.888484001159668,
+    14.544355392456055
+  ],
+  "cost_range": [
+    1.0,
+    12.397215511760965
+  ],
+  "pareto_size": 84
+}
