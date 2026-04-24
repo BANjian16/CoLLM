@@ -166,10 +166,12 @@ RMSE CoLLM : 34.263
 ### 5.2 测试集（Test Set）结果
 
 ```yaml
-RMSE Small : 35.972
-RMSE Large : 38.059
-RMSE CoLLM : 34.263
+RMSE Small : 17.820
+RMSE Large : 16.676
+RMSE CoLLM : 16.103
 ```
+
+默认路由阈值：tau1 = 0.7，tau2 = -0.2。
 
 在未知测试数据上，CoLLM 依然优于单一模型，表现出更好的泛化能力。
 
