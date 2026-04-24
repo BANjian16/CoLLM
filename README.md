@@ -1,169 +1,94 @@
-# CoLLM：具有模糊决策主体与自我反省机制的工业大小模型协作框架
+# CoLLM Industrial RUL: A Practical Large-Small Collaboration Baseline
 
-## 1. 项目简介
+## 项目定位
 
-随着工业设备运行数据规模和复杂度不断增加，单一模型在预测精度与计算成本之间往往难以兼顾。
-本项目复现了一种 **CoLLM: Industrial Large-Small Model
-Collaboration with Fuzzy Decision-making Agent
-and Self-Reflection** 协作框架，通过引入：
+这个仓库面向工业剩余寿命预测（RUL）场景，核心目标不是“单模型刷分”，而是让模型在精度、稳定性和推理开销之间取得可控平衡。
 
-* 小模型（Small Model）
-* 大模型（Large Model，基于 One Fits All）
-* 模糊决策主体（Fuzzy Decision Agent）
-* 自我反省模块（Self-Reflection Module）
+当前实现围绕 CoLLM 思路组织：
 
-实现工业时序任务中 **高效性与高精度的协同预测**。
+- Small Model：负责高吞吐、低延迟预测
+- Large Model（One Fits All 风格）：处理更复杂样本
+- Fuzzy Decision Agent：估计样本级置信度
+- Self-Reflection：评估大模型输出可靠性
 
-本项目以 **NASA CMAPSS 发动机退化数据集（FD001）** 为实验对象，完成剩余使用寿命（RUL）预测任务。
-![结果图](results/rul_comparison.png)
+数据集默认使用 NASA CMAPSS FD001。
 
 ---
 
-## 2. 整体框架概述
+## 核心思想
 
-CoLLM 框架由四个核心模块组成：
+对每个样本，系统先走小模型，再根据置信度决定是否调用大模型：
 
-```text
- ┌──────────────┐
- │  输入时序数据 │
- └──────┬───────┘
-        │
-┌───────▼────────┐
-│   Small Model   │
-│  轻量快速预测   │
-└───────┬────────┘
-        │ ps
-┌───────▼────────┐
-│   Large Model   │
-│ GPT2 TimeSeries │
-└───────┬────────┘
-        │ pl
-┌───────▼────────┐
-│ Fuzzy Decision  │
-│  + Reflection   │
-└───────┬────────┘
-        │
-   最终预测输出
+1. 小模型先给出预测 $y_s$ 和特征 $\phi_s$
+2. 模糊决策器输出小模型置信度 $Q_s$
+3. 若 $Q_s \ge \tau_1$，直接采用小模型输出
+4. 若 $Q_s < \tau_1$，调用大模型得到 $y_l, \phi_l$
+5. 自反思模块给出大模型置信度 $Q_l$
+6. 用 $\Delta = Q_s - Q_l$ 与 $\tau_2$ 比较，决定“直接用大模型”还是“大小模型融合”
+
+默认阈值固定为：
+
+- tau1 = 0.7
+- tau2 = -0.2
+
+---
+
+## 当前实现说明
+
+### Large Model
+
+- 使用 One Fits All 风格时序骨干（项目内封装）
+- 输入为 patch 化时间序列后做线性投影
+- 主干支持冻结训练，仅训练投影层/头部以提高稳定性
+
+### 训练流程
+
+训练采用三阶段：
+
+1. Stage 1：训练 Small Model 回归能力
+2. Stage 2：训练 Large Model（适配层和回归头）
+3. Stage 3：固定 S/L，训练 Fuzzy + Reflection
+
+这样做的目的是降低模块间梯度干扰，便于单独定位性能瓶颈。
+
+---
+
+## 快速开始
+
+### 1) 环境
+
+推荐使用 conda 环境：
+
+```bash
+conda activate collm_env
 ```
 
-* **Small Model**：负责快速、低成本的初步预测
-* **Large Model**：提供高表达能力的深层时序建模
-* **Fuzzy Decision Agent**：根据模型不确定性进行模糊决策
-* **Self-Reflection**：评估大模型预测的可信度并进行校正
+如需从头创建环境，可参考 environment.yml。
 
----
-
-## 3. 模型设计说明
-
-### 3.1 Small Model（小模型）
-
-* **结构**：轻量级时序网络
-* **输出**：
-
-  * `ys`：RUL 预测值
-  * `ps`：中间特征，用于置信度评估
-* **特点**：
-
-  * 推理速度快
-  * 适合大规模在线预测
-
-### 3.2 Large Model（OneFitsAllTimeSeries）
-
-* **基于** One Fits All 风格骨干，采用 patch + embedding 方式处理时间序列
-* **冻结** 主干参数，仅训练投影层与回归头
-* **输出**：
-
-  * `yl`：RUL 预测值
-  * `pl`：高维隐表示
-* **特点**：
-
-  * 表达能力强
-  * 对复杂退化模式建模效果好
-  * 计算成本较高
-
-### 3.3 Fuzzy Decision Agent（模糊决策主体）
-
-* **输入**：Small Model / Large Model 的中间特征
-* **输出**：预测可信度评分
-* **训练目标**：学习模型预测与真实误差之间的模糊映射关系
-* **核心思想**：不直接进行硬模型选择，而是对预测可信度进行连续建模
-
-### 3.4 Self-Reflection（自我反省模块）
-
-* **输入**：Large Model 的高维隐状态
-* **输出**：预测置信度
-* **功能**：
-
-  * 检测大模型在不同退化阶段的可靠性
-  * 减少过拟合或过度自信预测
-
----
-
-## 4. 训练策略与实验设置
-
-### 4.1 冻结策略
-
-在本实现中采用两阶段训练，与论文思路保持一致：
-
-* 阶段 A（监督回归预训练）：
-
-  * 训练 Small Model（`small.pt`）
-  * 训练 Large Model 的投影层与回归头（`large.pt`）
-  * GPT-2 主体参数冻结
-
-* 阶段 B（协作置信度学习）：
-
-  * 冻结 Small/Large
-  * 训练 Fuzzy Decision Agent（`fuzzy.pt`）
-  * 训练 Self-Reflection（`reflect.pt`）
-
-可直接运行：
+### 2) 训练
 
 ```bash
 python train/train_all.py
 ```
 
-默认策略：优先使用 GPU（CUDA），若不可用则自动回退到 CPU。
-
-若你想强制指定设备：
-
-```bash
-python train/train_all.py --device cuda
-python train/train_all.py --device cpu
-```
-
-训练完成后，再运行：
+### 3) 推理与评估
 
 ```bash
 python main.py
 python eval_test.py
 ```
 
-### 4.2 路由策略说明
+如果要显式指定阈值：
 
-当前 `CoLLM` 推理已按论文的 sample-level routing 实现：
-
-默认阈值固定为：`tau1 = 0.7`，`tau2 = -0.2`。
-
-* 当 $Q_s \ge \tau_1$：该样本直接采用 Small 输出
-* 当 $Q_s < \tau_1$ 且 $\Delta = Q_s - Q_l \le \tau_2$：采用 Large 输出
-* 当 $Q_s < \tau_1$ 且 $\Delta > \tau_2$：采用融合输出 $0.5( y_s + y_l )$
+```bash
+python eval_test.py --tau1 0.7 --tau2 -0.2
+```
 
 ---
 
-## 5. 实验结果
+## 当前结果（FD001）
 
-### 5.1 训练集（Train Set）结果
-
-```yaml
-RMSE Small : 35.972
-RMSE Large : 38.059
-RMSE CoLLM : 34.263
-```
-
-结果表明，CoLLM 在训练集上取得最优预测精度。
-
-### 5.2 测试集（Test Set）结果
+以下结果来自当前默认路由阈值（tau1=0.7, tau2=-0.2）：
 
 ```yaml
 RMSE Small : 17.820
@@ -171,26 +96,24 @@ RMSE Large : 16.676
 RMSE CoLLM : 16.103
 ```
 
-默认路由阈值：tau1 = 0.7，tau2 = -0.2。
-
-在未知测试数据上，CoLLM 依然优于单一模型，表现出更好的泛化能力。
+可见在当前权重下，协作路由优于单独小模型与大模型。
 
 ---
 
-## 6. 项目结构说明
+## 目录结构
 
 ```text
-COLM/
+CoLLM/
+├── data/
+├── datasets/
+│   ├── cmapss.py
+│   └── cmapss_test.py
 ├── models/
 │   ├── small.py
-│   ├── gpt2_ts.py
 │   ├── one_fits_all_ts.py
 │   ├── fuzzy.py
 │   ├── reflection.py
 │   └── collm.py
-├── datasets/
-│   ├── cmapss.py
-│   └── cmapss_test.py
 ├── train/
 │   ├── train_all.py
 │   ├── small.pt
@@ -198,9 +121,18 @@ COLM/
 │   ├── fuzzy.pt
 │   └── reflect.pt
 ├── eval_test.py
-├── results_test/
+├── main.py
+├── environment.yml
 └── README.md
 ```
+
+---
+
+## 说明与边界
+
+- 本仓库是工程化复现与改造版本，不等价于论文作者原始训练流水线。
+- 若要严格对齐论文数字，需同时对齐模型版本、数据划分、训练预算与阈值策略。
+- 建议将本项目作为可复现基线，再逐项替换模块做对照实验。
 
 
 
