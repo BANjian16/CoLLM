@@ -62,7 +62,7 @@ Fz.eval()
 
 # 自反思模块 R：
 # 根据大模型中间特征预测 Q_l，用于判断大模型当前结果是否可靠。
-Rf = SelfReflection(768, 12).to(DEVICE)
+Rf = SelfReflection(768, 13).to(DEVICE)
 Rf.load_state_dict(torch.load('./train/reflect.pt', map_location=DEVICE))
 Rf.eval()
 

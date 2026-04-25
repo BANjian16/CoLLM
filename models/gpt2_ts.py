@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import GPT2Model, GPT2Config
 
 
@@ -27,11 +28,10 @@ class GPT2TimeSeries(nn.Module):
                     local_files_only=local_files_only,
                 )
             except OSError as exc:
-                print(
-                    f"[GPT2TimeSeries] Cannot load pretrained '{pretrained_name}': {exc}\n"
-                    "[GPT2TimeSeries] Falling back to randomly initialized GPT-2 config."
-                )
-                self.gpt = GPT2Model(GPT2Config())
+                raise RuntimeError(
+                    f"Cannot load pretrained GPT-2 backbone '{pretrained_name}'. "
+                    "Use --random-gpt2 only for debugging, or download/cache the pretrained weights first."
+                ) from exc
         else:
             self.gpt = GPT2Model(GPT2Config())
 
@@ -53,11 +53,17 @@ class GPT2TimeSeries(nn.Module):
 
     def forward(self, x):
         B, T, d = x.shape
+        remainder = T % self.patch
+        if remainder:
+            pad_len = self.patch - remainder
+            x = F.pad(x, (0, 0, 0, pad_len))
+            T = T + pad_len
+
         patches = []
         # 将时间序列按不重叠窗口切分为多个 patch。
         # 例如论文和本项目常用 T=50、patch_size=4 时，
-        # 会得到 12 个完整 patch，末尾不足 4 的时间步会被忽略。
-        for i in range(0, T - self.patch + 1, self.patch):
+        # 会通过 padding 得到 13 个完整 patch，避免丢掉末尾时间步。
+        for i in range(0, T, self.patch):
             patches.append(x[:, i:i + self.patch, :].reshape(B, -1))
         patches = torch.stack(patches, 1)
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class FuzzyDecisionAgent(nn.Module):
@@ -12,6 +13,8 @@ class FuzzyDecisionAgent(nn.Module):
         # mu 与 sigma 是高斯隶属函数的可学习参数，
         # 分别对应论文公式中的模糊均值 μ 和模糊方差/尺度 σ。
         self.mu = nn.Parameter(torch.zeros(feature_dim))
+        # 这里保留参数名 sigma，方便旧 checkpoint 至少能按名字加载；
+        # forward 中再用 softplus 将它转换为严格正的尺度。
         self.sigma = nn.Parameter(torch.ones(feature_dim))
         # 根据论文，在得到模糊特征矩阵 M 后，
         # 将其展平并用“线性层 + Sigmoid”映射为样本级置信度分数。
@@ -22,7 +25,7 @@ class FuzzyDecisionAgent(nn.Module):
         # phi 的形状为 [batch, T, feature_dim]，
         # 即论文中的小模型时序隐特征 φ_s(x)。
         mu = self.mu.view(1,1,-1)
-        sigma = self.sigma.view(1,1,-1) + 1e-6
+        sigma = F.softplus(self.sigma).view(1,1,-1) + 1e-6
         # 论文中的高斯隶属函数：
         # M = exp(-((phi - mu)^2) / sigma^2)
         # 这里对每个时间步、每个特征维独立计算其模糊隶属度。

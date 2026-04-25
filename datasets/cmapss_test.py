@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 
 
 class CMAPSSTestDataset(Dataset):
-    def __init__(self, test_path, rul_path, window_size=50):
+    def __init__(self, test_path, rul_path, window_size=50, sensor_mean=None, sensor_std=None, stats_path=None):
         # CMAPSS 测试集预处理。
         # 与训练集不同，测试集每台发动机只取“最后一个可观测窗口”，
         # 标签来自官方提供的 RUL 文件。
@@ -21,7 +21,13 @@ class CMAPSSTestDataset(Dataset):
 
         # 测试时必须与训练阶段保持完全一致的 14 维传感器选择。
         sensors = data[:, [5 + i for i in SENSOR_IDX]]
-        sensors = (sensors - sensors.mean(0)) / (sensors.std(0) + 1e-6)
+        if stats_path is not None:
+            stats = np.load(stats_path)
+            sensor_mean = stats["sensor_mean"]
+            sensor_std = stats["sensor_std"]
+        if sensor_mean is None or sensor_std is None:
+            raise ValueError("CMAPSSTestDataset requires training sensor_mean/sensor_std or stats_path.")
+        sensors = (sensors - np.asarray(sensor_mean)) / (np.asarray(sensor_std) + 1e-6)
 
         self.X, self.y = [], []
 

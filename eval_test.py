@@ -47,7 +47,7 @@ Fz = FuzzyDecisionAgent(32, 50).to(DEVICE)
 Fz.load_state_dict(torch.load('./train/fuzzy.pt', map_location=DEVICE))
 Fz.eval()
 
-Rf = SelfReflection(768, 12).to(DEVICE)
+Rf = SelfReflection(768, 13).to(DEVICE)
 Rf.load_state_dict(torch.load('./train/reflect.pt', map_location=DEVICE))
 Rf.eval()
 
@@ -62,7 +62,8 @@ model = CoLLM(S, L, Fz, Rf)
 # 标签来自官方提供的真实剩余寿命 RUL。
 dataset = CMAPSSTestDataset(
     f'{DATA_ROOT}/test_FD001.txt',
-    f'{DATA_ROOT}/RUL_FD001.txt'
+    f'{DATA_ROOT}/RUL_FD001.txt',
+    stats_path='./train/scaler_stats.npz'
 )
 
 loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)

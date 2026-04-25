@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,15 +61,33 @@ def rmse_from_loss(mse_loss):
     return mse_loss ** 0.5
 
 
+def num_patches(window_size, patch_size):
+    return int(np.ceil(window_size / patch_size))
+
+
+def split_by_unit(dataset, val_ratio, seed):
+    units = np.unique(dataset.sample_unit_ids)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(units)
+    val_unit_count = max(1, int(round(len(units) * val_ratio)))
+    val_units = set(units[:val_unit_count])
+
+    train_indices, val_indices = [], []
+    for idx, unit_id in enumerate(dataset.sample_unit_ids):
+        if unit_id in val_units:
+            val_indices.append(idx)
+        else:
+            train_indices.append(idx)
+
+    return Subset(dataset, train_indices), Subset(dataset, val_indices)
+
+
 def build_loaders(args):
     dataset = CMAPSSDataset(args.data, window_size=args.window_size, stride=args.stride)
-    val_size = int(len(dataset) * args.val_ratio)
-    train_size = len(dataset) - val_size
-    generator = torch.Generator().manual_seed(args.seed)
-    train_set, val_set = random_split(dataset, [train_size, val_size], generator=generator)
+    train_set, val_set = split_by_unit(dataset, args.val_ratio, args.seed)
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False)
-    return train_loader, val_loader
+    return train_loader, val_loader, dataset
 
 
 def evaluate_regressor(model, loader, device):
@@ -199,7 +217,12 @@ def main():
     save_dir = Path(args.save_dir)
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device(args.device)
-    train_loader, val_loader = build_loaders(args)
+    train_loader, val_loader, dataset = build_loaders(args)
+    np.savez(
+        save_dir / "scaler_stats.npz",
+        sensor_mean=dataset.sensor_mean,
+        sensor_std=dataset.sensor_std,
+    )
 
     requested = set(args.stages)
     if "all" in requested:
@@ -236,9 +259,8 @@ def main():
         S.load_state_dict(torch.load(small_path, map_location=device))
         L.load_state_dict(torch.load(large_path, map_location=device))
 
-        num_patches = (args.window_size - args.patch_size) // args.patch_size + 1
         Fz = FuzzyDecisionAgent(feature_dim=32, T=args.window_size).to(device)
-        Rf = SelfReflection(feature_dim=L.gpt.config.hidden_size, T=num_patches).to(device)
+        Rf = SelfReflection(feature_dim=L.gpt.config.hidden_size, T=num_patches(args.window_size, args.patch_size)).to(device)
         optimizer_conf = torch.optim.Adam(
             list(Fz.parameters()) + list(Rf.parameters()),
             lr=args.lr_confidence,

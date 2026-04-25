@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 
 
 class CMAPSSDataset(Dataset):
-    def __init__(self, data_path, window_size=50, stride=1):
+    def __init__(self, data_path, window_size=50, stride=1, sensor_mean=None, sensor_std=None):
         # CMAPSS 训练集预处理。
         # 每个样本由一个定长滑动窗口构成，标签取该窗口最后一个时刻对应的 RUL。
         # 这与论文中的时间序列滑窗建样本方式一致。
@@ -33,9 +33,12 @@ class CMAPSSDataset(Dataset):
         rul = np.array(rul)
 
         # 按特征维做标准化，缓解不同传感器量纲不一致的问题。
-        sensors = (sensors - sensors.mean(0)) / (sensors.std(0) + 1e-6)
+        # 训练阶段会保存这组统计量；测试阶段必须复用它，不能重新在测试集上 fit。
+        self.sensor_mean = sensors.mean(0) if sensor_mean is None else np.asarray(sensor_mean)
+        self.sensor_std = sensors.std(0) if sensor_std is None else np.asarray(sensor_std)
+        sensors = (sensors - self.sensor_mean) / (self.sensor_std + 1e-6)
 
-        self.X, self.y = [], []
+        self.X, self.y, self.sample_unit_ids = [], [], []
         for uid in np.unique(unit_ids):
             idx = np.where(unit_ids == uid)[0]
             for i in range(0, len(idx) - window_size + 1, stride):
@@ -44,9 +47,11 @@ class CMAPSSDataset(Dataset):
                 # y 是窗口最后一个时间步所对齐的 RUL 标签。
                 self.X.append(sensors[idx[i:i+window_size]])
                 self.y.append(rul[idx[i+window_size-1]])
+                self.sample_unit_ids.append(uid)
 
         self.X = torch.from_numpy(np.array(self.X)).float()
         self.y = torch.tensor(self.y, dtype=torch.float32)
+        self.sample_unit_ids = np.array(self.sample_unit_ids)
 
     def __len__(self):
         return len(self.X)

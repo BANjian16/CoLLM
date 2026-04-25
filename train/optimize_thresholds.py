@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Subset
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--tau2-min", type=float, default=-0.5)
     parser.add_argument("--tau2-max", type=float, default=0.5)
     parser.add_argument("--tau2-step", type=float, default=0.01)
+    parser.add_argument("--min-large-rate", type=float, default=0.05)
     parser.add_argument("--split", choices=["val", "train", "all"], default="val")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--random-gpt2", action="store_true")
@@ -50,16 +51,34 @@ def make_grid(start, stop, step):
     return np.round(values, 10)
 
 
+def num_patches(window_size, patch_size):
+    return int(np.ceil(window_size / patch_size))
+
+
+def split_by_unit(dataset, val_ratio, seed):
+    units = np.unique(dataset.sample_unit_ids)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(units)
+    val_unit_count = max(1, int(round(len(units) * val_ratio)))
+    val_units = set(units[:val_unit_count])
+
+    train_indices, val_indices = [], []
+    for idx, unit_id in enumerate(dataset.sample_unit_ids):
+        if unit_id in val_units:
+            val_indices.append(idx)
+        else:
+            train_indices.append(idx)
+
+    return Subset(dataset, train_indices), Subset(dataset, val_indices)
+
+
 def build_loader(args):
     dataset = CMAPSSDataset(args.data, window_size=args.window_size, stride=args.stride)
 
     if args.split == "all":
         selected = dataset
     else:
-        val_size = int(len(dataset) * args.val_ratio)
-        train_size = len(dataset) - val_size
-        generator = torch.Generator().manual_seed(args.seed)
-        train_set, val_set = random_split(dataset, [train_size, val_size], generator=generator)
+        train_set, val_set = split_by_unit(dataset, args.val_ratio, args.seed)
         selected = val_set if args.split == "val" else train_set
 
     return DataLoader(selected, batch_size=args.batch_size, shuffle=False)
@@ -76,8 +95,7 @@ def load_models(args, device):
         local_files_only=args.local_files_only,
     ).to(device)
     Fz = FuzzyDecisionAgent(32, args.window_size).to(device)
-    num_patches = (args.window_size - args.patch_size) // args.patch_size + 1
-    Rf = SelfReflection(L.gpt.config.hidden_size, num_patches).to(device)
+    Rf = SelfReflection(L.gpt.config.hidden_size, num_patches(args.window_size, args.patch_size)).to(device)
 
     S.load_state_dict(torch.load(model_dir / "small.pt", map_location=device))
     L.load_state_dict(torch.load(model_dir / "large.pt", map_location=device))
@@ -128,8 +146,9 @@ def evaluate_thresholds(ys, yl, q_s, q_l, y_true, tau1, tau2):
     return rmse, large_rate, fusion_rate
 
 
-def search(ys, yl, q_s, q_l, y_true, tau1_values, tau2_values):
+def search(ys, yl, q_s, q_l, y_true, tau1_values, tau2_values, min_large_rate):
     best = None
+    fallback = None
 
     for tau1 in tau1_values:
         for tau2 in tau2_values:
@@ -141,6 +160,12 @@ def search(ys, yl, q_s, q_l, y_true, tau1_values, tau2_values):
                 "large_rate": large_rate,
                 "fusion_rate": fusion_rate,
             }
+            if fallback is None or candidate["rmse"] < fallback["rmse"]:
+                fallback = candidate
+
+            if large_rate < min_large_rate:
+                continue
+
             if best is None:
                 best = candidate
                 continue
@@ -150,7 +175,7 @@ def search(ys, yl, q_s, q_l, y_true, tau1_values, tau2_values):
             if better_rmse or same_rmse_lower_cost:
                 best = candidate
 
-    return best
+    return best if best is not None else fallback
 
 
 def write_config(config_path, tau1, tau2):
@@ -171,15 +196,23 @@ def main():
 
     tau1_values = make_grid(args.tau1_min, args.tau1_max, args.tau1_step)
     tau2_values = make_grid(args.tau2_min, args.tau2_max, args.tau2_step)
-    best = search(ys, yl, q_s, q_l, y_true, tau1_values, tau2_values)
+    best = search(ys, yl, q_s, q_l, y_true, tau1_values, tau2_values, args.min_large_rate)
     write_config(args.config_path, best["tau1"], best["tau2"])
 
+    small_rmse = float(np.sqrt(np.mean((ys - y_true) ** 2)))
+    large_rmse = float(np.sqrt(np.mean((yl - y_true) ** 2)))
+    fusion_rmse = float(np.sqrt(np.mean((0.5 * (ys + yl) - y_true) ** 2)))
+    print("Baselines:")
+    print(f"  small only : {small_rmse:.6f}")
+    print(f"  large only : {large_rmse:.6f}")
+    print(f"  avg fusion : {fusion_rmse:.6f}")
     print("Best thresholds found:")
     print(f"  tau1       : {best['tau1']:.6f}")
     print(f"  tau2       : {best['tau2']:.6f}")
     print(f"  RMSE       : {best['rmse']:.6f}")
     print(f"  large rate : {best['large_rate']:.2%}")
     print(f"  fusion rate: {best['fusion_rate']:.2%}")
+    print(f"  min large rate constraint: {args.min_large_rate:.2%}")
     print(f"Updated config: {args.config_path}")
 
 
