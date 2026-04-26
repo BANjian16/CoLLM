@@ -5,43 +5,39 @@ from config import TAU1, TAU2
 
 class CoLLM:
     def __init__(self, S, L, F, R):
-        # CoLLM 协同推理总控器：
-        # S: 小模型 Small Model
-        # L: 大模型 Large Model
-        # F: 模糊决策代理 Fuzzy Decision Agent
-        # R: 自反思模块 Self-Reflection
-        #
-        # 它本身不定义新的网络层，而是把论文中的三级决策流程串起来。
         self.S, self.L, self.F, self.R = S, L, F, R
 
-
     @torch.no_grad()
-    def inference(self, x, tau1=TAU1, tau2=TAU2):
-        # 第一阶段：先运行小模型，获得低成本预测 ys 和隐特征 φ_s。
+    def inference(self, x, tau1=TAU1, tau2=TAU2, return_details=False):
         ys, phi_s = self.S(x)
-        Qs = self.F(phi_s)
-        # 论文决策函数 D1：
-        # 若 Q_s >= tau1，说明样本复杂度较低/小模型足够可靠，
-        # 则直接接受小模型预测并提前退出。
-        small_mask = Qs >= tau1
+        q_s = self.F(phi_s)
+
+        use_small = q_s >= tau1
         y_final = ys.clone()
-        uncertain_mask = ~small_mask
+        uncertain = ~use_small
 
-        if not uncertain_mask.any():
-            return y_final
+        use_large = torch.zeros_like(use_small, dtype=torch.bool)
+        use_fusion = torch.zeros_like(use_small, dtype=torch.bool)
+        q_l_full = torch.full_like(q_s, float("nan"))
 
-        # 第二阶段：若小模型置信度不足，则调用大模型进行更深层推理。
-        x_uncertain = x[uncertain_mask]
-        yl, phi_l = self.L(x_uncertain)
-        Ql = self.R(phi_l)
-        # 论文定义 Delta = Q_s - Q_l。
-        # 若 Delta <= tau2，说明大模型置信度没有显著差于小模型，
-        # 则直接接受大模型输出 yl。
-        #
-        # 若 Delta > tau2，说明大模型当前样本上的可靠性偏弱，
-        # 触发“小模型辅助修正”路径。本文实现使用最简单的平均融合：
-        # y_final = (ys + yl) / 2
-        delta = Qs[uncertain_mask] - Ql
-        large_or_fused = torch.where(delta <= tau2, yl, 0.5*(ys[uncertain_mask]+yl))
-        y_final[uncertain_mask] = large_or_fused
+        if uncertain.any():
+            yl, phi_l = self.L(x[uncertain])
+            q_l = self.R(phi_l)
+            delta = q_s[uncertain] - q_l
+            use_large_uncertain = delta <= tau2
+            y_uncertain = torch.where(use_large_uncertain, yl, 0.5 * (ys[uncertain] + yl))
+
+            y_final[uncertain] = y_uncertain
+            use_large[uncertain] = use_large_uncertain
+            use_fusion[uncertain] = ~use_large_uncertain
+            q_l_full[uncertain] = q_l
+
+        if return_details:
+            return y_final, {
+                "use_small": use_small,
+                "use_large": use_large,
+                "use_fusion": use_fusion,
+                "q_s": q_s,
+                "q_l": q_l_full,
+            }
         return y_final

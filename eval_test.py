@@ -1,181 +1,172 @@
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
+import argparse
+import math
 import os
 
-from models.collm import CoLLM
-from models.small import SmallModel
-from models.gpt2_ts import GPT2TimeSeries
-from models.fuzzy import FuzzyDecisionAgent
-from models.reflection import SelfReflection
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from config import get_thresholds
 from datasets.cmapss_test import CMAPSSTestDataset
-from config import TAU1, TAU2
+from models.collm import CoLLM
+from models.fuzzy import FuzzyDecisionAgent
+from models.one_fits_all_ts import OneFitsAllTimeSeries
+from models.reflection import SelfReflection
+from models.small import SmallModel
 
 
-# ============================================================
-# Config
-# ============================================================
-
-# 本脚本在官方测试集 FD001 上评估 CoLLM。
-# 与 main.py 偏可视化训练集行为不同，这里更接近论文中的正式测试流程。
-DEVICE = 'cpu'
-DATA_ROOT = 'data/CMAPSS'
-BATCH_SIZE = 64
-DPI = 600
-SAVE_DIR = './results_test'
-N_SHOW = 300
-
-os.makedirs(SAVE_DIR, exist_ok=True)
-
-
-# ============================================================
-# Load models
-# ============================================================
-
-# 恢复协同框架中的四个核心模块。
-# 注意：推理阶段只做前向传播，不再更新任何参数。
-S = SmallModel().to(DEVICE)
-S.load_state_dict(torch.load('./train/small.pt', map_location=DEVICE))
-S.eval()
-
-L = GPT2TimeSeries().to(DEVICE)
-L.load_state_dict(torch.load('./train/large.pt', map_location=DEVICE))
-L.eval()
-
-Fz = FuzzyDecisionAgent(32, 50).to(DEVICE)
-Fz.load_state_dict(torch.load('./train/fuzzy.pt', map_location=DEVICE))
-Fz.eval()
-
-Rf = SelfReflection(768, 13).to(DEVICE)
-Rf.load_state_dict(torch.load('./train/reflect.pt', map_location=DEVICE))
-Rf.eval()
-
-model = CoLLM(S, L, Fz, Rf)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate CoLLM on CMAPSS FD001/FD003 test set.")
+    parser.add_argument("--data-root", type=str, default="data/CMAPSS")
+    parser.add_argument("--model-dir", type=str, default="train")
+    parser.add_argument("--save-dir", type=str, default="results_test")
+    parser.add_argument("--subset", choices=["FD001", "FD003"], default="FD001")
+    parser.add_argument("--threshold-preset", choices=["A", "B", "C"], default="C")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--window-size", type=int, default=50)
+    parser.add_argument("--patch-size", type=int, default=4)
+    parser.add_argument("--tau1", type=float, default=None)
+    parser.add_argument("--tau2", type=float, default=None)
+    parser.add_argument("--dpi", type=int, default=300)
+    return parser.parse_args()
 
 
-# ============================================================
-# Load TEST dataset
-# ============================================================
-
-# 测试集中每台发动机只贡献一个最终窗口，
-# 标签来自官方提供的真实剩余寿命 RUL。
-dataset = CMAPSSTestDataset(
-    f'{DATA_ROOT}/test_FD001.txt',
-    f'{DATA_ROOT}/RUL_FD001.txt',
-    stats_path='./train/scaler_stats.npz'
-)
-
-loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
+def rmse(pred, target):
+    return float(np.sqrt(np.mean((pred - target) ** 2)))
 
 
-# ============================================================
-# Evaluation
-# ============================================================
-
-ys, yl, yc, ytrue = [], [], [], []
-
-with torch.no_grad():
-    for x, y in loader:
-        x = x.to(DEVICE)
-
-        # 单独的小模型预测，作为对照基线之一。
-        y_s, _ = S(x)
-
-        # 单独的大模型预测，作为另一条对照基线。
-        y_l, _ = L(x)
-
-        # 协同预测。
-        # 此处直接使用 CoLLM.inference 的默认阈值 tau1=0.6、tau2=0.05，
-        # 与论文中常见的一组阈值配置一致。
-        y_c = model.inference(x, TAU1, TAU2)
-
-        ys.append(y_s.numpy())
-        yl.append(y_l.numpy())
-        yc.append(y_c.numpy())
-        ytrue.append(y.numpy())
-
-ys = np.concatenate(ys)
-yl = np.concatenate(yl)
-yc = np.concatenate(yc)
-ytrue = np.concatenate(ytrue)
+def mae(pred, target):
+    return float(np.mean(np.abs(pred - target)))
 
 
-def rmse(p, y):
-    # 测试集同样使用 RMSE 评价预测误差。
-    return np.sqrt(np.mean((p - y) ** 2))
+def load_state(model, path, device):
+    model.load_state_dict(torch.load(path, map_location=device))
+    model.eval()
+    return model
 
 
-print(f'RMSE Small : {rmse(ys, ytrue):.3f}')
-print(f'RMSE Large : {rmse(yl, ytrue):.3f}')
-print(f'RMSE CoLLM : {rmse(yc, ytrue):.3f}')
+def main():
+    args = parse_args()
+    paper_tau1, paper_tau2 = get_thresholds(args.subset, args.threshold_preset)
+    if args.tau1 is None:
+        args.tau1 = paper_tau1
+    if args.tau2 is None:
+        args.tau2 = paper_tau2
+    os.makedirs(args.save_dir, exist_ok=True)
+    device = torch.device(args.device)
+
+    small = load_state(SmallModel().to(device), os.path.join(args.model_dir, "small.pt"), device)
+    large = load_state(
+        OneFitsAllTimeSeries(patch_size=args.patch_size).to(device),
+        os.path.join(args.model_dir, "large.pt"),
+        device,
+    )
+    fuzzy = load_state(
+        FuzzyDecisionAgent(32, args.window_size).to(device),
+        os.path.join(args.model_dir, "fuzzy.pt"),
+        device,
+    )
+    n_patches = math.ceil(args.window_size / args.patch_size)
+    reflect = load_state(
+        SelfReflection(large.hidden_size, n_patches).to(device),
+        os.path.join(args.model_dir, "reflect.pt"),
+        device,
+    )
+    collm = CoLLM(small, large, fuzzy, reflect)
+
+    stats_path = os.path.join(args.model_dir, "scaler_stats.npz")
+    dataset = CMAPSSTestDataset(
+        os.path.join(args.data_root, f"test_{args.subset}.txt"),
+        os.path.join(args.data_root, f"RUL_{args.subset}.txt"),
+        window_size=args.window_size,
+        stats_path=stats_path if os.path.exists(stats_path) else None,
+        train_path=os.path.join(args.data_root, f"train_{args.subset}.txt"),
+    )
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+
+    ys, yl, yc, ytrue = [], [], [], []
+    route_small, route_large, route_fusion = [], [], []
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            y_s, _ = small(x)
+            y_l, _ = large(x)
+            y_c, details = collm.inference(x, args.tau1, args.tau2, return_details=True)
+
+            ys.append(y_s.cpu().numpy())
+            yl.append(y_l.cpu().numpy())
+            yc.append(y_c.cpu().numpy())
+            ytrue.append(y.numpy())
+            route_small.append(details["use_small"].cpu().numpy())
+            route_large.append(details["use_large"].cpu().numpy())
+            route_fusion.append(details["use_fusion"].cpu().numpy())
+
+    ys = np.concatenate(ys)
+    yl = np.concatenate(yl)
+    yc = np.concatenate(yc)
+    ytrue = np.concatenate(ytrue)
+    route_small = np.concatenate(route_small)
+    route_large = np.concatenate(route_large)
+    route_fusion = np.concatenate(route_fusion)
+
+    print(f"RMSE Small : {rmse(ys, ytrue):.3f}")
+    print(f"RMSE Large : {rmse(yl, ytrue):.3f}")
+    print(f"RMSE CoLLM : {rmse(yc, ytrue):.3f}")
+    print(f"MAE Small  : {mae(ys, ytrue):.3f}")
+    print(f"MAE Large  : {mae(yl, ytrue):.3f}")
+    print(f"MAE CoLLM  : {mae(yc, ytrue):.3f}")
+    print(f"Routes     : small={route_small.mean():.2%}, large={route_large.mean():.2%}, fusion={route_fusion.mean():.2%}")
+    print(f"Dataset    : {args.subset}")
+    print(f"Thresholds : preset={args.threshold_preset}, tau1={args.tau1:.3f}, tau2={args.tau2:.3f}")
+
+    n_show = min(300, len(ytrue))
+    plt.figure(figsize=(10, 4))
+    plt.plot(ytrue[:n_show], label="Ground Truth", linewidth=2)
+    plt.plot(ys[:n_show], "--", label="Small Model")
+    plt.plot(yl[:n_show], ":", label="Large Model")
+    plt.plot(yc[:n_show], label="CoLLM", linewidth=2)
+    plt.xlabel("Sample Index")
+    plt.ylabel("RUL")
+    plt.title(f"RUL Prediction on Test Set ({args.subset})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.save_dir, f"{args.subset}_test_rul_comparison.png"), dpi=args.dpi)
+    plt.savefig(os.path.join(args.save_dir, f"{args.subset}_test_rul_comparison.pdf"), dpi=args.dpi)
+    plt.close()
+
+    err_s = ys - ytrue
+    err_l = yl - ytrue
+    err_c = yc - ytrue
+
+    plt.figure(figsize=(6, 4))
+    plt.hist(err_s, bins=40, alpha=0.5, label="Small")
+    plt.hist(err_l, bins=40, alpha=0.5, label="Large")
+    plt.hist(err_c, bins=40, alpha=0.7, label="CoLLM")
+    plt.xlabel("Prediction Error")
+    plt.ylabel("Frequency")
+    plt.title(f"Error Distribution on Test Set ({args.subset})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.save_dir, f"{args.subset}_test_error_distribution.png"), dpi=args.dpi)
+    plt.savefig(os.path.join(args.save_dir, f"{args.subset}_test_error_distribution.pdf"), dpi=args.dpi)
+    plt.close()
+
+    plt.figure(figsize=(6, 4))
+    plt.scatter(ytrue, err_s, s=8, alpha=0.3, label="Small")
+    plt.scatter(ytrue, err_l, s=8, alpha=0.3, label="Large")
+    plt.scatter(ytrue, err_c, s=8, alpha=0.4, label="CoLLM")
+    plt.axhline(0, linestyle="--")
+    plt.xlabel("Ground Truth RUL")
+    plt.ylabel("Prediction Error")
+    plt.title("Prediction Error vs RUL (Test Set)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.save_dir, f"{args.subset}_test_error_vs_rul.png"), dpi=args.dpi)
+    plt.savefig(os.path.join(args.save_dir, f"{args.subset}_test_error_vs_rul.pdf"), dpi=args.dpi)
+    plt.close()
 
 
-# ============================================================
-# Plot 1: RUL Prediction Comparison (Test)
-# ============================================================
-
-# 在留出测试样本上比较三条预测路径与真实标签的关系。
-plt.figure(figsize=(10, 4))
-plt.plot(ytrue[:N_SHOW], label='Ground Truth', linewidth=2)
-plt.plot(ys[:N_SHOW], '--', label='Small Model')
-plt.plot(yl[:N_SHOW], ':', label='Large Model')
-plt.plot(yc[:N_SHOW], label='CoLLM', linewidth=2)
-
-plt.xlabel('Sample Index')
-plt.ylabel('RUL')
-plt.title('RUL Prediction on Test Set (FD001)')
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(f'{SAVE_DIR}/test_rul_comparison.png', dpi=DPI)
-plt.savefig(f'{SAVE_DIR}/test_rul_comparison.pdf', dpi=DPI)
-plt.close()
-
-
-# ============================================================
-# Plot 2: Error Distribution (Test)
-# ============================================================
-
-# 误差直方图用于观察协同推理是否减小了测试集上的误差离散程度。
-err_s = ys - ytrue
-err_l = yl - ytrue
-err_c = yc - ytrue
-
-plt.figure(figsize=(6, 4))
-plt.hist(err_s, bins=50, alpha=0.5, label='Small')
-plt.hist(err_l, bins=50, alpha=0.5, label='Large')
-plt.hist(err_c, bins=50, alpha=0.7, label='CoLLM')
-
-plt.xlabel('Prediction Error')
-plt.ylabel('Frequency')
-plt.title('Error Distribution on Test Set (FD001)')
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(f'{SAVE_DIR}/test_error_distribution.png', dpi=DPI)
-plt.savefig(f'{SAVE_DIR}/test_error_distribution.pdf', dpi=DPI)
-plt.close()
-
-
-# ============================================================
-# Plot 3: Error vs RUL (Test)
-# ============================================================
-
-# 用“真实 RUL - 预测误差”散点图观察：
-# 不同寿命阶段是否会让某个分支更容易出错。
-plt.figure(figsize=(6, 4))
-plt.scatter(ytrue, err_s, s=5, alpha=0.3, label='Small')
-plt.scatter(ytrue, err_l, s=5, alpha=0.3, label='Large')
-plt.scatter(ytrue, err_c, s=5, alpha=0.4, label='CoLLM')
-plt.axhline(0, linestyle='--')
-
-plt.xlabel('Ground Truth RUL')
-plt.ylabel('Prediction Error')
-plt.title('Prediction Error vs RUL (Test Set)')
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(f'{SAVE_DIR}/test_error_vs_rul.png', dpi=DPI)
-plt.savefig(f'{SAVE_DIR}/test_error_vs_rul.pdf', dpi=DPI)
-plt.close()
+if __name__ == "__main__":
+    main()
