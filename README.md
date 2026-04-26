@@ -265,11 +265,10 @@ PAPER_THRESHOLDS = {
 python main.py eval --subset FD001 --model-dir train --tau1 0.6 --tau2 0.05
 ```
 
-但汇报复现结果时，最好以论文预设阈值为主，不要用测试集反复调阈值刷指标。
 
 ## 代码阅读建议
 
-如果你是深度学习新手，建议按这个顺序看：
+建议按这个顺序看：
 
 1. `datasets/cmapss.py`：先理解数据怎么变成 `(X, y)`。
 2. `models/small.py`：理解小模型如何从传感器序列预测 RUL。
