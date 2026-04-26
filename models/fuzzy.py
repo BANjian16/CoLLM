@@ -4,33 +4,36 @@ import torch.nn.functional as F
 
 
 class FuzzyDecisionAgent(nn.Module):
+    """模糊决策代理 F。
+
+    它的作用不是直接预测 RUL，而是根据小模型的隐表示 phi_s 判断：
+    “这个样本小模型自己有没有把握？”
+
+    输出 q_s 位于 [0, 1]：
+    - q_s 越大，表示越相信小模型，可以直接用小模型结果，节省调用大模型的成本。
+    - q_s 越小，表示小模型不确定，需要继续调用大模型或进行融合。
+    """
+
     def __init__(self, feature_dim, T):
         super().__init__()
-        # 模糊决策代理 F：
-        # 根据小模型输出的隐特征 φ_s(x) 预测置信度 Q_s，
-        # 对应论文中“是否需要调用大模型”的样本级路由模块。
-        #
-        # mu 与 sigma 是高斯隶属函数的可学习参数，
-        # 分别对应论文公式中的模糊均值 μ 和模糊方差/尺度 σ。
+        # mu 和 sigma 是可学习的高斯隶属函数参数。
+        # 直觉上：模型会学习“什么样的隐藏特征看起来可靠”。
         self.mu = nn.Parameter(torch.zeros(feature_dim))
-        # 这里保留参数名 sigma，方便旧 checkpoint 至少能按名字加载；
-        # forward 中再用 softplus 将它转换为严格正的尺度。
         self.sigma = nn.Parameter(torch.ones(feature_dim))
-        # 根据论文，在得到模糊特征矩阵 M 后，
-        # 将其展平并用“线性层 + Sigmoid”映射为样本级置信度分数。
+
+        # 每个时间步、每个特征都会算一个隶属度 M。
+        # 展平成 feature_dim * T 后，用线性层压成一个置信度分数。
         self.fc = nn.Linear(feature_dim * T, 1)
 
-
     def forward(self, phi):
-        # phi 的形状为 [batch, T, feature_dim]，
-        # 即论文中的小模型时序隐特征 φ_s(x)。
-        mu = self.mu.view(1,1,-1)
-        sigma = F.softplus(self.sigma).view(1,1,-1) + 1e-6
-        # 论文中的高斯隶属函数：
-        # M = exp(-((phi - mu)^2) / sigma^2)
-        # 这里对每个时间步、每个特征维独立计算其模糊隶属度。
+        # phi: [batch, T, feature_dim]
+        # T 对小模型来说是时间窗口长度，例如 50。
+        mu = self.mu.view(1, 1, -1)
+        sigma = F.softplus(self.sigma).view(1, 1, -1) + 1e-6
+
+        # 高斯隶属函数：
+        # M 越接近 1，说明该隐藏特征越接近模型学到的“可靠中心” mu。
         M = torch.exp(-((phi - mu) ** 2) / sigma ** 2)
-        # 输出 Q_s ∈ [0, 1]。
-        # Q_s 越高，说明当前样本越适合直接采用小模型预测，
-        # 也就是越有可能在第一阶段提前退出而不调用大模型。
+
+        # sigmoid 把任意实数压到 0~1，作为小模型置信度 q_s。
         return torch.sigmoid(self.fc(M.flatten(1))).squeeze(-1)

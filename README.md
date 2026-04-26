@@ -1,56 +1,58 @@
 ﻿# CoLLM 复现项目
 
-本项目复现论文 **CoLLM: Industrial Large-Small Model Collaboration With Fuzzy Decision-Making Agent and Self-Reflection** 中的工业剩余寿命预测框架。当前版本重点支持 NASA CMAPSS 数据集的 **FD001** 和 **FD003**，并尽量严格保留论文中的大小模型协作、模糊决策和自反思思路。
+本项目复现论文 **CoLLM: Industrial Large-Small Model Collaboration With Fuzzy Decision-Making Agent and Self-Reflection** 的主要流程，用于 NASA CMAPSS 航空发动机剩余寿命预测，也就是 RUL 预测。
 
-> 说明：论文已经单独汇报过，本仓库 README 主要面向代码运行、实验复现和后续继续调试。
+当前代码主要支持 **FD001** 和 **FD003** 两个子数据集。整体思路是：先用小模型快速预测，如果小模型比较自信，就直接采用小模型结果；如果小模型不确定，再调用 GPT-2 based One Fits All 大模型，并通过模糊决策和自反思模块决定最终使用小模型、大模型，还是两者融合的结果。
 
-## 项目目标
+## 项目特点
 
-CoLLM 的核心思想是：先用小模型进行低成本预测，再根据置信度和模糊阈值判断是否交给大模型或融合分支处理，从而在精度和计算成本之间取得平衡。
+- 支持 CMAPSS FD001 / FD003 数据读取、滑动窗口采样、标准化和 RUL 截断。
+- 小模型 `SmallModel` 用于低成本 RUL 预测。
+- 大模型 `OneFitsAllTimeSeries` 采用 GPT-2 based One Fits All 思路：时间序列 patch embedding + GPT-2 预训练骨干 + 冻结大部分参数。
+- 模糊决策模块 `FuzzyDecisionAgent` 用于估计小模型置信度。
+- 自反思模块 `SelfReflection` 用于估计大模型置信度。
+- `CoLLM` 模块实现论文中的大模型-小模型协作路由逻辑。
+- 提供完整训练脚本、测试脚本、结果图保存和当前训练好的权重。
 
-本复现项目已经完成：
+## 当前复现结果
 
-- CMAPSS FD001 / FD003 数据读取、滑窗、归一化和 RUL 截断。
-- SmallModel、One Fits All 风格 LargeModel、FuzzyDecisionAgent、SelfReflection 与 CoLLM 路由。
-- FD001 / FD003 的训练、测试和结果图输出。
-- 论文阈值预设 A/B/C 的统一配置。
-- 项目汇报 PPT：`ppt_work/output/CoLLM_复现项目汇报.pptx`。
-
-## 当前结果
-
-以下结果使用严格论文阈值预设 **C**，即默认 `--threshold-preset C`。
+下面结果使用论文风格的阈值预设 **C**。
 
 | 数据集 | Small RMSE | Large RMSE | CoLLM-C RMSE | CoLLM-C MAE | 论文 CoLLM-C RMSE | 论文 CoLLM-C MAE |
 |---|---:|---:|---:|---:|---:|---:|
-| FD001 | 15.093 | 14.111 | 14.082 | 10.580 | 12.33 | 8.86 |
-| FD003 | 16.903 | 15.045 | 15.018 | 10.558 | 11.11 | 7.12 |
+| FD001 | 16.617 | 16.276 | 14.656 | 10.482 | 12.33 | 8.86 |
+| FD003 | 16.428 | 16.844 | 15.567 | 11.254 | 11.11 | 7.12 |
 
-当前复现已经跑通完整流程，但与论文结果仍有差距。主要原因是本项目的大模型为可复现的 One Fits All 风格实现，还没有完全等价于论文中的完整预训练资源和训练细节；后续优化应继续围绕大模型能力、confidence 校准和多 seed 稳定性展开，而不是偏离论文算法路线做结果搜索。
+目前已经跑通完整流程，并且 CoLLM 结果优于单独的小模型和大模型。不过结果仍然弱于论文，主要原因是论文没有完全公开 One Fits All 的训练细节、预训练权重选择、置信度校准细节等。后续调参应尽量保持论文算法路线，不建议为了指标随意改掉协作机制。
 
 ## 环境配置
 
-推荐使用 conda 环境 `collm_env`：
+使用 `environment.yml` 创建环境：
 
-```powershell
-conda env create -n collm_env -f environment.yml
-conda activate collm_env
+```bash
+conda env create -f environment.yml
+conda activate 环境名
 ```
 
-如果本机是 RTX 50 系列或更新 GPU，`environment.yml` 中较旧的 PyTorch CUDA 版本可能无法正常使用 GPU。可以在激活环境后安装适配当前显卡的 PyTorch 版本，例如本机调试时使用的是支持 CUDA 12.8 的 PyTorch：
+如果 PowerShell 识别不了 `conda`，可以先初始化：
 
 ```powershell
-pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+conda init powershell
 ```
 
-检查 GPU：
+然后关闭 PowerShell 重新打开。
 
-```powershell
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
+检查 PyTorch 和 CUDA：
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-## 数据准备
+如果 `torch.cuda.is_available()` 输出 `False`，说明当前环境没有正确使用 GPU，训练速度会明显变慢。
 
-数据目录应保持如下结构：
+## 数据集
+
+CMAPSS 数据放在：
 
 ```text
 data/
@@ -63,15 +65,17 @@ data/
     RUL_FD003.txt
 ```
 
-项目中也保留了 FD002 / FD004 原始文件，但当前训练与评估脚本主要支持 FD001 和 FD003。
+项目目录里也包含 FD002 / FD004 原始文件，但当前主要复现和评估的是 FD001 / FD003。
 
-数据处理默认设置：
+默认数据处理方式：
 
-- 滑窗长度：`window_size=50`
-- 滑窗步长：`stride=1`
-- RUL 最大截断：`125`
-- 传感器数量：14 个论文相关传感器
-- 测试集归一化：优先使用模型目录下的 `scaler_stats.npz`
+| 项目 | 默认值 |
+|---|---:|
+| 输入窗口长度 | 50 |
+| 滑动步长 | 1 |
+| RUL 最大截断 | 125 |
+| 使用传感器通道数 | 14 |
+| 测试集标准化 | 使用训练阶段保存的 `scaler_stats.npz` |
 
 ## 项目结构
 
@@ -79,104 +83,140 @@ data/
 CoLLM/
   data/CMAPSS/                  # CMAPSS 原始数据
   datasets/
-    cmapss.py                   # 训练集预处理与滑窗
+    cmapss.py                   # 训练集读取、RUL 构造、滑动窗口
     cmapss_test.py              # 官方测试集构造
   models/
     small.py                    # 小模型
-    one_fits_all_ts.py          # One Fits All 风格大模型
-    fuzzy.py                    # 模糊决策主体
+    one_fits_all_ts.py          # GPT-2 based One Fits All 大模型
+    fuzzy.py                    # 模糊决策代理
     reflection.py               # 自反思模块
-    collm.py                    # CoLLM 推理路由
+    collm.py                    # CoLLM 推理路由逻辑
   train/
-    train_all.py                # 统一训练入口
-    train_conf.py               # 早期 confidence 训练脚本
-    optimize_thresholds.py      # 阈值搜索辅助脚本，不作为默认论文复现实验
-    small.pt / large.pt / fuzzy.pt / reflect.pt
-    scaler_stats.npz            # FD001 当前权重与归一化统计
+    train_all.py                # 训练入口
+    small.pt                    # FD001 小模型权重
+    large.pt                    # FD001 大模型权重
+    fuzzy.pt                    # FD001 模糊决策权重
+    reflect.pt                  # FD001 自反思权重
+    scaler_stats.npz            # FD001 标准化参数
   train_fd003/
-    small.pt / large.pt / fuzzy.pt / reflect.pt
-    scaler_stats.npz            # FD003 当前权重与归一化统计
-  results/                      # 训练或早期实验图
-  results_test/                 # FD001 / FD003 官方测试图
-  ppt_work/
-    output/CoLLM_复现项目汇报.pptx
-    src/build_deck.mjs
-  config.py                     # 论文阈值 A/B/C
-  eval_test.py                  # 官方测试集评估入口
-  main.py                       # 原始入口脚本
-  CLEANUP_PLAN.md               # 项目清理记录
+    small.pt                    # FD003 小模型权重
+    large.pt                    # FD003 大模型权重
+    fuzzy.pt                    # FD003 模糊决策权重
+    reflect.pt                  # FD003 自反思权重
+    scaler_stats.npz            # FD003 标准化参数
+  results_test/                 # FD001 / FD003 测试结果图
+  config.py                     # 论文阈值预设
+  eval_test.py                  # 测试和画图入口
+  main.py                       # 简化统一入口
 ```
 
-## 训练
+## 快速使用
 
-统一训练脚本为 `train/train_all.py`。训练分为三个阶段：
+推荐从 `main.py` 开始。它只是一个简化入口，内部会转发到真正的训练脚本或测试脚本。
 
-1. `small`：训练 SmallModel。
-2. `large`：训练 LargeModel。
-3. `confidence`：冻结 small / large，训练 FuzzyDecisionAgent 和 SelfReflection。
+训练 FD001：
 
-### FD001 训练
-
-```powershell
-python train/train_all.py `
-  --subset FD001 `
-  --save-dir train `
-  --threshold-preset C `
-  --stages all
+```bash
+python main.py train --subset FD001 --save-dir train --threshold-preset C --stages all
 ```
 
-### FD003 训练
+测试 FD001：
 
-```powershell
-python train/train_all.py `
-  --subset FD003 `
-  --save-dir train_fd003 `
-  --threshold-preset C `
-  --stages all
+```bash
+python main.py eval --subset FD001 --model-dir train --save-dir results_test --threshold-preset C
 ```
 
-### 只重训某个阶段
+训练 FD003：
 
-例如只重训 confidence：
+```bash
+python main.py train --subset FD003 --save-dir train_fd003 --threshold-preset C --stages all
+```
 
-```powershell
-python train/train_all.py `
-  --subset FD003 `
-  --save-dir train_fd003 `
-  --threshold-preset C `
-  --stages confidence
+测试 FD003：
+
+```bash
+python main.py eval --subset FD003 --model-dir train_fd003 --save-dir results_test --threshold-preset C
+```
+
+查看帮助：
+
+```bash
+python main.py --help
+python main.py train --help
+python main.py eval --help
+```
+
+## 训练说明
+
+真正的训练脚本是：
+
+```text
+train/train_all.py
+```
+
+训练分成三个阶段：
+
+1. `small`：训练小模型 `SmallModel`。
+2. `large`：训练 GPT-2 based One Fits All 大模型 `OneFitsAllTimeSeries`。
+3. `confidence`：冻结小模型和大模型，训练 `FuzzyDecisionAgent` 和 `SelfReflection`。
+
+完整训练：
+
+```bash
+python train/train_all.py --subset FD001 --save-dir train --threshold-preset C --stages all
+```
+
+只训练某一阶段，例如只重训置信度模块：
+
+```bash
+python train/train_all.py --subset FD001 --save-dir train --threshold-preset C --stages confidence
 ```
 
 常用参数：
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `--subset` | `FD001` | 可选 `FD001` / `FD003` |
-| `--threshold-preset` | `C` | 论文阈值预设 `A` / `B` / `C` |
-| `--window-size` | `50` | 输入窗口长度 |
-| `--patch-size` | `4` | LargeModel patch 大小 |
+| `--subset` | `FD001` | 选择 `FD001` 或 `FD003` |
+| `--threshold-preset` | `C` | 论文风格阈值预设：`A`、`B`、`C` |
+| `--window-size` | `50` | 输入时间窗口长度 |
+| `--patch-size` | `4` | 大模型 patch 大小 |
+| `--gpt2-name` | `gpt2` | HuggingFace GPT-2 名称或本地缓存名称 |
+| `--gpt-layers` | `6` | 保留 GPT-2 前几层 |
+| `--gpt2-allow-download` | 默认关闭 | 允许自动下载 GPT-2 权重 |
+| `--batch-size` | `64` | 批大小 |
 | `--epochs-small` | `30` | 小模型训练轮数 |
 | `--epochs-large` | `120` | 大模型训练轮数 |
-| `--epochs-conf` | `40` | confidence 分支训练轮数 |
-| `--split-mode` | `random` | 训练/验证划分方式，可选 `random` / `unit` |
-| `--norm-scope` | `train` | 归一化统计来源，可选 `train` / `combined` |
+| `--epochs-conf` | `40` | 置信度模块训练轮数 |
+| `--split-mode` | `random` | 窗口随机切分或按发动机切分：`random` / `unit` |
+| `--norm-scope` | `train` | 标准化范围，严格实验建议使用 `train` |
 
-## 测试与出图
+## 测试说明
 
-评估入口为 `eval_test.py`。脚本会输出 Small、Large、CoLLM 的 RMSE / MAE 和路由比例，并保存三类图：
+真正的测试脚本是：
 
-- RUL 预测对比图
+```text
+eval_test.py
+```
+
+它会输出：
+
+- Small / Large / CoLLM 的 RMSE
+- Small / Large / CoLLM 的 MAE
+- 样本最终走小模型、大模型、融合路径的比例
+- RUL 预测曲线图
 - 误差分布图
 - 误差与真实 RUL 关系图
 
-### FD001 测试
+测试 FD001：
 
-```powershell
-python eval_test.py `
-  --subset FD001 `
-  --model-dir train `
-  --save-dir results_test `
-  --threshold-preset C
+```bash
+python eval_test.py --subset FD001 --model-dir train --save-dir results_test --threshold-preset C
+```
+
+测试 FD003：
+
+```bash
+python eval_test.py --subset FD003 --model-dir train_fd003 --save-dir results_test --threshold-preset C
 ```
 
 输出文件示例：
@@ -187,27 +227,14 @@ results_test/FD001_test_error_distribution.png
 results_test/FD001_test_error_vs_rul.png
 ```
 
-### FD003 测试
+## 阈值说明
 
-```powershell
-python eval_test.py `
-  --subset FD003 `
-  --model-dir train_fd003 `
-  --save-dir results_test `
-  --threshold-preset C
-```
+论文中的 CoLLM 路由依赖两个阈值：
 
-输出文件示例：
+- `tau1`：判断小模型是否足够自信。
+- `tau2`：判断大模型是否比小模型更值得相信。
 
-```text
-results_test/FD003_test_rul_comparison.png
-results_test/FD003_test_error_distribution.png
-results_test/FD003_test_error_vs_rul.png
-```
-
-## 阈值配置
-
-论文阈值写在 `config.py`：
+阈值写在 `config.py` 中：
 
 ```python
 PAPER_THRESHOLDS = {
@@ -224,43 +251,47 @@ PAPER_THRESHOLDS = {
 }
 ```
 
-默认使用 `C`。如果要临时覆盖阈值，可以在训练或测试时传入：
+严格复现时建议使用：
 
-```powershell
-python eval_test.py --subset FD001 --model-dir train --tau1 0.6 --tau2 0.05
+```bash
+--threshold-preset A
+--threshold-preset B
+--threshold-preset C
 ```
 
-注意：为了严格遵守论文思路，正式汇报结果建议使用 `--threshold-preset A/B/C`，不要用私自搜索出的阈值替代论文阈值。
+虽然也可以手动指定：
 
-## 汇报材料
-
-已生成一份用于向老师汇报复现项目的 PPT：
-
-```text
-ppt_work/output/CoLLM_复现项目汇报.pptx
+```bash
+python main.py eval --subset FD001 --model-dir train --tau1 0.6 --tau2 0.05
 ```
 
-PPT 源脚本：
+但汇报复现结果时，最好以论文预设阈值为主，不要用测试集反复调阈值刷指标。
 
-```text
-ppt_work/src/build_deck.mjs
-```
+## 代码阅读建议
 
-如需重新生成 PPT，需要恢复 `ppt_work/node_modules` 中对 `@oai/artifact-tool` 的链接，或使用 Codex/Artifact Tool 环境重新运行生成脚本。
+如果你是深度学习新手，建议按这个顺序看：
 
-## 后续改进方向
+1. `datasets/cmapss.py`：先理解数据怎么变成 `(X, y)`。
+2. `models/small.py`：理解小模型如何从传感器序列预测 RUL。
+3. `models/one_fits_all_ts.py`：理解 GPT-2 怎么被改造成时间序列模型。
+4. `models/fuzzy.py`：理解小模型置信度 `q_s` 怎么来。
+5. `models/reflection.py`：理解大模型置信度 `q_l` 怎么来。
+6. `models/collm.py`：理解最终路由逻辑。
+7. `train/train_all.py`：理解完整训练流程。
+8. `eval_test.py`：理解测试指标和结果图。
 
-建议后续按以下顺序继续迭代：
+## 当前保留文件说明
 
-1. 补齐更接近论文的 LargeModel / One Fits All / 预训练 backbone。
-2. 保持论文 A/B/C 阈值思想，继续优化 confidence 训练与验证方式。
-3. 固定 seed，多次训练，报告均值、方差和路由比例。
-4. 补充推理耗时、分流比例和计算成本，体现大小模型协作价值。
-5. 在不违背论文算法的前提下，继续缩小 FD001 / FD003 与论文指标的差距。
+- `train/`：当前 FD001 权重。
+- `train_fd003/`：当前 FD003 权重。
+- `results_test/`：当前 FD001 / FD003 测试图。
+- 旧实验图、临时测试脚本和中间文本已经清理掉。
 
-## 注意事项
+## 后续可以改进的方向
 
-- `train/` 和 `train_fd003/` 是当前正式权重目录，不要随意删除。
-- `results_test/FD001_*` 和 `results_test/FD003_*` 是当前正式测试结果。
-- `optimize_thresholds.py` 仅作为分析工具，不能替代严格论文阈值实验。
-- 如果重新清理项目，可参考 `CLEANUP_PLAN.md`。
+- 继续细化 GPT-2 based One Fits All 的训练策略。
+- 改善小模型和大模型的置信度校准。
+- 多随机种子重复实验，报告均值和标准差。
+- 增加推理耗时、调用大模型比例等分析，更完整地体现“大模型-小模型协作”的意义。
+- 在不改变论文核心算法的前提下，继续缩小与论文结果的差距。
+

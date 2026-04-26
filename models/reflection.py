@@ -3,15 +3,18 @@ import torch.nn as nn
 
 
 class SelfReflection(nn.Module):
+    """自反思模块 R。
+
+    小模型置信度由 FuzzyDecisionAgent 估计；大模型也需要一个类似的置信度。
+    SelfReflection 根据大模型的隐表示 phi_l 输出 q_l，表示“大模型对自己的预测有多自信”。
+    """
+
     def __init__(self, feature_dim, T):
         super().__init__()
-        # 自反思模块 R：
-        # 根据大模型隐表示 φ_l(x) 估计其预测置信度 Q_l。
-        # 论文这里采用的是非常直接的全连接置信度头。
+        # phi_l 的形状是 [batch, patch_num, GPT_hidden]。
+        # 展平后用一个全连接层输出单个置信度。
         self.fc = nn.Linear(feature_dim * T, 1)
-    
 
     def forward(self, phi):
-        # 将时间/patch 维展开成一维向量，再映射为单个标量置信度。
-        # 这与论文公式 Q_l = R(φ_l(x)) 的实现形式一致。
+        # 输出 q_l in [0, 1]。值越大，表示越相信大模型预测。
         return torch.sigmoid(self.fc(phi.flatten(1))).squeeze(-1)
